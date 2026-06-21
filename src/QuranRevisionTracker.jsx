@@ -1,4 +1,5 @@
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
+import { App as CapApp } from "@capacitor/app";
 
 // ---------- Surah data: [number, arabic, english, ayah count] (Hafs) ----------
 const SURAHS = [
@@ -128,9 +129,13 @@ const storage = {
 
 export default function QuranRevisionTracker() {
   const [cycles, setCycles] = useState([]);
+  const [folders, setFolders] = useState([]);
   const [loading, setLoading] = useState(true);
   const [saveError, setSaveError] = useState(false);
-  const [openCycleId, setOpenCycleId] = useState(null);
+
+  // ---- Screen navigation stack: {screen:"home"} | {screen:"folder", folderId} | {screen:"cycle", cycleId} ----
+  const [nav, setNav] = useState([{ screen: "home" }]);
+
   const [renamingId, setRenamingId] = useState(null);
   const [renameText, setRenameText] = useState("");
   const [confirmDeleteId, setConfirmDeleteId] = useState(null);
@@ -138,6 +143,13 @@ export default function QuranRevisionTracker() {
   const [search, setSearch] = useState("");
   const [editSurah, setEditSurah] = useState(null);
   const [editValue, setEditValue] = useState(0);
+
+  // ---- Folder CRUD state ----
+  const [creatingFolder, setCreatingFolder] = useState(false);
+  const [newFolderName, setNewFolderName] = useState("");
+  const [renamingFolderId, setRenamingFolderId] = useState(null);
+  const [renameFolderText, setRenameFolderText] = useState("");
+  const [confirmDeleteFolderId, setConfirmDeleteFolderId] = useState(null);
 
   // ---- New cycle wizard state ----
   const [creating, setCreating] = useState(false);     // step 1: name + scope
@@ -156,12 +168,21 @@ export default function QuranRevisionTracker() {
     return () => document.head.removeChild(link);
   }, []);
 
-  // Load
+  // Load (backwards-compatible: old saves were a plain array of cycles, no folders)
   useEffect(() => {
     (async () => {
       try {
         const res = await storage.get(STORAGE_KEY);
-        if (res?.value) setCycles(JSON.parse(res.value));
+        if (res?.value) {
+          const parsed = JSON.parse(res.value);
+          if (Array.isArray(parsed)) {
+            setCycles(parsed);
+            setFolders([]);
+          } else {
+            setCycles(parsed.cycles || []);
+            setFolders(parsed.folders || []);
+          }
+        }
       } catch {
         // no data yet — first run
       } finally {
@@ -170,10 +191,11 @@ export default function QuranRevisionTracker() {
     })();
   }, []);
 
-  const persist = async (next) => {
-    setCycles(next);
+  const persist = async (nextCycles, nextFolders) => {
+    setCycles(nextCycles);
+    setFolders(nextFolders);
     try {
-      await storage.set(STORAGE_KEY, JSON.stringify(next));
+      await storage.set(STORAGE_KEY, JSON.stringify({ cycles: nextCycles, folders: nextFolders }));
       setSaveError(false);
     } catch {
       setSaveError(true);
@@ -189,6 +211,74 @@ export default function QuranRevisionTracker() {
     setPickSearch("");
   };
 
+  // ---------- Navigation ----------
+  const navTop = nav[nav.length - 1];
+  const pushCycle = (id) => setNav((n) => [...n, { screen: "cycle", cycleId: id }]);
+  const pushFolder = (id) => setNav((n) => [...n, { screen: "folder", folderId: id }]);
+  const popNav = () => setNav((n) => (n.length > 1 ? n.slice(0, -1) : n));
+
+  const openCycle = navTop.screen === "cycle" ? cycles.find((c) => c.id === navTop.cycleId) : null;
+  const openFolder = navTop.screen === "folder" ? folders.find((f) => f.id === navTop.folderId) : null;
+  const activeFolderId = navTop.screen === "folder" ? navTop.folderId : null;
+
+  // Close whatever overlay/panel is open; return true if something was closed.
+  const closeTopOverlay = () => {
+    if (picking) { setPicking(false); return true; }
+    if (creating) { resetWizard(); return true; }
+    if (creatingFolder) { setCreatingFolder(false); setNewFolderName(""); return true; }
+    if (renamingId) { setRenamingId(null); return true; }
+    if (renamingFolderId) { setRenamingFolderId(null); return true; }
+    if (confirmDeleteId) { setConfirmDeleteId(null); return true; }
+    if (confirmResetId) { setConfirmResetId(null); return true; }
+    if (confirmDeleteFolderId) { setConfirmDeleteFolderId(null); return true; }
+    if (editSurah !== null) { setEditSurah(null); return true; }
+    return false;
+  };
+
+  const handleBack = () => {
+    if (closeTopOverlay()) return;
+    if (nav.length > 1) { popNav(); return; }
+    CapApp.exitApp().catch(() => {}); // no-op on web; exits on native Android
+  };
+
+  // Native/hardware back button (Android) — always calls the latest handleBack via ref
+  const handleBackRef = useRef(handleBack);
+  useEffect(() => {
+    handleBackRef.current = handleBack;
+  });
+  useEffect(() => {
+    let handle;
+    CapApp.addListener("backButton", () => handleBackRef.current()).then((h) => {
+      handle = h;
+    });
+    return () => handle?.remove();
+  }, []);
+
+  // ---------- Folder CRUD ----------
+  const createFolder = () => {
+    const name = newFolderName.trim();
+    if (!name) return;
+    const f = { id: Date.now().toString(36), name, createdAt: Date.now(), updatedAt: Date.now() };
+    persist(cycles, [f, ...folders]);
+    setCreatingFolder(false);
+    setNewFolderName("");
+  };
+  const renameFolder = (id) => {
+    if (!renameFolderText.trim()) return setRenamingFolderId(null);
+    persist(
+      cycles,
+      folders.map((f) => (f.id === id ? { ...f, name: renameFolderText.trim(), updatedAt: Date.now() } : f))
+    );
+    setRenamingFolderId(null);
+  };
+  const deleteFolder = (id) => {
+    const updatedCycles = cycles.map((c) => (c.folderId === id ? { ...c, folderId: null } : c));
+    const updatedFolders = folders.filter((f) => f.id !== id);
+    persist(updatedCycles, updatedFolders);
+    setConfirmDeleteFolderId(null);
+    if (navTop.screen === "folder" && navTop.folderId === id) popNav();
+  };
+
   // ---------- Cycle CRUD ----------
   const createCycle = (surahNums) => {
     const name = newName.trim() || `Cycle ${cycles.length + 1}`;
@@ -200,8 +290,9 @@ export default function QuranRevisionTracker() {
       progress: {},
       log: {},           // daily ayah log: { "YYYY-MM-DD": ayahsDoneThatDay }
       surahs: surahNums, // null = full Quran
+      folderId: activeFolderId,
     };
-    persist([c, ...cycles]);
+    persist([c, ...cycles], folders);
     resetWizard();
   };
 
@@ -223,13 +314,16 @@ export default function QuranRevisionTracker() {
 
   const renameCycle = (id) => {
     if (!renameText.trim()) return setRenamingId(null);
-    persist(cycles.map((c) => (c.id === id ? { ...c, name: renameText.trim(), updatedAt: Date.now() } : c)));
+    persist(
+      cycles.map((c) => (c.id === id ? { ...c, name: renameText.trim(), updatedAt: Date.now() } : c)),
+      folders
+    );
     setRenamingId(null);
   };
   const deleteCycle = (id) => {
-    persist(cycles.filter((c) => c.id !== id));
+    persist(cycles.filter((c) => c.id !== id), folders);
     setConfirmDeleteId(null);
-    if (openCycleId === id) setOpenCycleId(null);
+    if (navTop.screen === "cycle" && navTop.cycleId === id) popNav();
   };
   const resetCycleProgress = (id) => {
     persist(
@@ -237,7 +331,8 @@ export default function QuranRevisionTracker() {
         c.id === id
           ? { ...c, progress: {}, log: {}, resetAt: Date.now(), updatedAt: Date.now() }
           : c
-      )
+      ),
+      folders
     );
     setConfirmResetId(null);
   };
@@ -252,8 +347,9 @@ export default function QuranRevisionTracker() {
       progress: {}, // fresh start — same surah selection, zero progress
       log: {},
       surahs: src.surahs ? [...src.surahs] : null,
+      folderId: src.folderId ?? null,
     };
-    persist([copy, ...cycles]);
+    persist([copy, ...cycles], folders);
   };
 
   // Updates progress AND logs the day's ayah delta for pace tracking
@@ -276,11 +372,10 @@ export default function QuranRevisionTracker() {
           progress: { ...c.progress, [surahNum]: ayah },
           log,
         };
-      })
+      }),
+      folders
     );
   };
-
-  const openCycle = cycles.find((c) => c.id === openCycleId);
 
   const filteredSurahs = useMemo(() => {
     if (!openCycle) return [];
@@ -301,6 +396,9 @@ export default function QuranRevisionTracker() {
     () => [...picked].reduce((s, n) => s + SURAH_MAP[n][3], 0),
     [picked]
   );
+
+  const ungroupedCycles = useMemo(() => cycles.filter((c) => !c.folderId), [cycles]);
+  const folderCycles = (folderId) => cycles.filter((c) => c.folderId === folderId);
 
   // ---------- Shared bits ----------
   const ProgressBar = ({ value, max, height = 6, color = C.gold }) => (
@@ -361,6 +459,291 @@ export default function QuranRevisionTracker() {
     color: C.ink,
     outline: "none",
   };
+  const sectionTitle = { fontSize: 13, fontWeight: 700, color: C.inkSoft, margin: "18px 0 8px" };
+
+  // Reusable: dashboard of donut-chart progress rings for a list of cycles
+  const renderProgressOverview = (list, title = "Progress overview") => {
+    if (list.length === 0) return null;
+    return (
+      <div style={{ ...card, marginTop: 16, borderTop: `3px solid ${C.gold}` }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: C.inkSoft, marginBottom: 12 }}>
+          {title}
+        </div>
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))",
+            gap: 12,
+          }}
+        >
+          {list.map((c) => {
+            const st = cycleStats(c);
+            const size = 76, stroke = 9;
+            const r = (size - stroke) / 2;
+            const circ = 2 * Math.PI * r;
+            const frac = Math.min(st.pct, 100) / 100;
+            const ringColor = st.pct >= 100 ? C.done : C.gold;
+            return (
+              <div
+                key={c.id}
+                onClick={() => pushCycle(c.id)}
+                style={{ textAlign: "center", cursor: "pointer" }}
+              >
+                <div style={{ position: "relative", width: size, height: size, margin: "0 auto" }}>
+                  <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
+                    <circle
+                      cx={size / 2} cy={size / 2} r={r}
+                      fill="none" stroke={C.line} strokeWidth={stroke}
+                    />
+                    <circle
+                      cx={size / 2} cy={size / 2} r={r}
+                      fill="none" stroke={ringColor} strokeWidth={stroke}
+                      strokeLinecap="round"
+                      strokeDasharray={circ}
+                      strokeDashoffset={circ * (1 - frac)}
+                      style={{ transition: "stroke-dashoffset .4s ease" }}
+                    />
+                  </svg>
+                  <div
+                    style={{
+                      position: "absolute", inset: 0,
+                      display: "flex", alignItems: "center", justifyContent: "center",
+                      fontSize: 14, fontWeight: 700,
+                      color: st.pct >= 100 ? C.done : C.ink,
+                    }}
+                  >
+                    {st.pct >= 100 ? "✓" : `${Math.round(st.pct)}%`}
+                  </div>
+                </div>
+                <div
+                  style={{
+                    fontSize: 11, fontWeight: 600, color: C.inkSoft, marginTop: 6,
+                    overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
+                  }}
+                >
+                  {c.name}
+                </div>
+                <div style={{ fontSize: 10, color: C.faint, marginTop: 1 }}>
+                  ~{st.avgPerDay} ayahs/day
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
+  // Reusable: a single cycle card (used on Home for ungrouped cycles, and inside a folder)
+  const renderCycleCard = (c) => {
+    const st = cycleStats(c);
+    const isFull = st.surahCount === 114;
+    return (
+      <div key={c.id} style={{ ...card, borderRight: `3px solid ${C.gold}` }}>
+        {renamingId === c.id ? (
+          <div>
+            <input
+              autoFocus
+              value={renameText}
+              onChange={(e) => setRenameText(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && renameCycle(c.id)}
+              style={inputStyle}
+            />
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button onClick={() => renameCycle(c.id)} style={btn()}>Save name</button>
+              <button onClick={() => setRenamingId(null)} style={ghostBtn}>Cancel</button>
+            </div>
+          </div>
+        ) : confirmResetId === c.id ? (
+          <div>
+            <div style={{ fontSize: 14, marginBottom: 10 }}>
+              Reset all progress in <b>{c.name}</b> back to zero? The surah selection stays the same, and the daily pace counter restarts.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => resetCycleProgress(c.id)} style={btn(C.gold)}>Reset progress</button>
+              <button onClick={() => setConfirmResetId(null)} style={ghostBtn}>Keep it</button>
+            </div>
+          </div>
+        ) : confirmDeleteId === c.id ? (
+          <div>
+            <div style={{ fontSize: 14, marginBottom: 10 }}>
+              Delete <b>{c.name}</b> and all its progress? This can't be undone.
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => deleteCycle(c.id)} style={btn(C.danger)}>Delete</button>
+              <button onClick={() => setConfirmDeleteId(null)} style={ghostBtn}>Keep it</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div onClick={() => pushCycle(c.id)} style={{ cursor: "pointer" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
+                  <div style={{ fontSize: 16, fontWeight: 700 }}>{c.name}</div>
+                  <span
+                    style={{
+                      fontSize: 10, fontWeight: 600, padding: "2px 7px", borderRadius: 99, whiteSpace: "nowrap",
+                      background: isFull ? "#EAF3ED" : C.goldSoft,
+                      color: isFull ? C.done : "#7A5A14",
+                    }}
+                  >
+                    {isFull ? "Full Quran" : `${st.surahCount} surahs`}
+                  </span>
+                </div>
+                <div style={{ fontSize: 15, fontWeight: 700, color: st.pct >= 100 ? C.done : C.gold }}>
+                  {st.pct}%
+                </div>
+              </div>
+              <div style={{ margin: "8px 0" }}>
+                <ProgressBar value={st.done} max={st.total} />
+              </div>
+              <div style={{ fontSize: 12, color: C.faint }}>
+                {st.done.toLocaleString()} of {st.total.toLocaleString()} ayahs · {st.completed} of {st.surahCount} surahs · ~{st.avgPerDay} ayahs/day · updated {fmtDate(c.updatedAt)}
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+              <button onClick={() => pushCycle(c.id)} style={{ ...btn(C.inkSoft), flex: 1, padding: "8px 12px", fontSize: 13, minWidth: 70 }}>
+                Open
+              </button>
+              <button onClick={() => { setRenamingId(c.id); setRenameText(c.name); }} style={ghostBtn}>
+                Rename
+              </button>
+              <button onClick={() => duplicateCycle(c.id)} style={ghostBtn}>
+                Duplicate
+              </button>
+              <button onClick={() => setConfirmResetId(c.id)} style={{ ...ghostBtn, color: "#7A5A14", borderColor: C.goldSoft }}>
+                Reset
+              </button>
+              <button onClick={() => setConfirmDeleteId(c.id)} style={{ ...ghostBtn, color: C.danger, borderColor: "#E8C7C2" }}>
+                Delete
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  // Reusable: a single folder card (Home screen)
+  const renderFolderCard = (f) => {
+    const count = folderCycles(f.id).length;
+    return (
+      <div key={f.id} style={{ ...card, borderRight: `3px solid ${C.inkSoft}` }}>
+        {renamingFolderId === f.id ? (
+          <div>
+            <input
+              autoFocus
+              value={renameFolderText}
+              onChange={(e) => setRenameFolderText(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && renameFolder(f.id)}
+              style={inputStyle}
+            />
+            <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+              <button onClick={() => renameFolder(f.id)} style={btn()}>Save name</button>
+              <button onClick={() => setRenamingFolderId(null)} style={ghostBtn}>Cancel</button>
+            </div>
+          </div>
+        ) : confirmDeleteFolderId === f.id ? (
+          <div>
+            <div style={{ fontSize: 14, marginBottom: 10 }}>
+              Delete folder <b>{f.name}</b>? Its {count} cycle{count === 1 ? "" : "s"} won't be deleted — they'll move to "Ungrouped".
+            </div>
+            <div style={{ display: "flex", gap: 8 }}>
+              <button onClick={() => deleteFolder(f.id)} style={btn(C.danger)}>Delete folder</button>
+              <button onClick={() => setConfirmDeleteFolderId(null)} style={ghostBtn}>Keep it</button>
+            </div>
+          </div>
+        ) : (
+          <>
+            <div onClick={() => pushFolder(f.id)} style={{ display: "flex", alignItems: "center", gap: 12, cursor: "pointer" }}>
+              <div
+                style={{
+                  width: 34, height: 34, borderRadius: 10, flexShrink: 0,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                  fontSize: 16, background: "#F1F6F2", border: `1px solid ${C.line}`,
+                }}
+              >
+                📁
+              </div>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <div style={{ fontSize: 15, fontWeight: 700 }}>{f.name}</div>
+                <div style={{ fontSize: 12, color: C.faint }}>{count} cycle{count === 1 ? "" : "s"}</div>
+              </div>
+            </div>
+            <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
+              <button onClick={() => pushFolder(f.id)} style={{ ...btn(C.inkSoft), flex: 1, padding: "8px 12px", fontSize: 13, minWidth: 70 }}>
+                Open
+              </button>
+              <button onClick={() => { setRenamingFolderId(f.id); setRenameFolderText(f.name); }} style={ghostBtn}>
+                Rename
+              </button>
+              <button onClick={() => setConfirmDeleteFolderId(f.id)} style={{ ...ghostBtn, color: C.danger, borderColor: "#E8C7C2" }}>
+                Delete
+              </button>
+            </div>
+          </>
+        )}
+      </div>
+    );
+  };
+
+  // New-cycle wizard step 1 panel (name + scope), shared between Home and Folder screens
+  const renderCycleWizard = () => (
+    <div style={{ ...card, marginBottom: 16 }}>
+      <input
+        autoFocus
+        placeholder={`Cycle name (e.g. Cycle ${cycles.length + 1}, Ramadan revision)`}
+        value={newName}
+        onChange={(e) => setNewName(e.target.value)}
+        style={inputStyle}
+      />
+
+      <div style={{ fontSize: 13, fontWeight: 600, margin: "14px 0 8px", color: C.inkSoft }}>
+        What does this cycle cover?
+      </div>
+      <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+        {[
+          ["full", "Full Quran", `All 114 surahs · ${TOTAL_AYAHS.toLocaleString()} ayahs`],
+          ["custom", "Pick surahs", "Choose specific surahs for this cycle"],
+        ].map(([val, title, sub]) => {
+          const sel = scope === val;
+          return (
+            <div
+              key={val}
+              onClick={() => setScope(val)}
+              style={{
+                display: "flex", alignItems: "center", gap: 12,
+                padding: "12px", borderRadius: 12, cursor: "pointer",
+                border: `2px solid ${sel ? C.ink : C.line}`,
+                background: sel ? "#F1F6F2" : "#fff",
+              }}
+            >
+              <div
+                style={{
+                  width: 18, height: 18, borderRadius: "50%", flexShrink: 0,
+                  border: `2px solid ${sel ? C.ink : C.line}`,
+                  display: "flex", alignItems: "center", justifyContent: "center",
+                }}
+              >
+                {sel && <div style={{ width: 9, height: 9, borderRadius: "50%", background: C.ink }} />}
+              </div>
+              <div>
+                <div style={{ fontSize: 14, fontWeight: 600 }}>{title}</div>
+                <div style={{ fontSize: 12, color: C.faint }}>{sub}</div>
+              </div>
+            </div>
+          );
+        })}
+      </div>
+
+      <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
+        <button onClick={handleCreateContinue} style={{ ...btn(), flex: 1 }}>
+          {scope === "full" ? "Create cycle" : "Choose surahs →"}
+        </button>
+        <button onClick={resetWizard} style={ghostBtn}>Cancel</button>
+      </div>
+    </div>
+  );
 
   if (loading) {
     return (
@@ -493,7 +876,10 @@ export default function QuranRevisionTracker() {
     return (
       <div style={page}>
         <div style={wrap}>
-          <button onClick={() => { setOpenCycleId(null); setEditSurah(null); setSearch(""); }} style={{ ...ghostBtn, marginBottom: 14 }}>
+          <button
+            onClick={() => { setEditSurah(null); setSearch(""); popNav(); }}
+            style={{ ...ghostBtn, marginBottom: 14 }}
+          >
             ← All cycles
           </button>
 
@@ -513,52 +899,6 @@ export default function QuranRevisionTracker() {
             </div>
             <div style={{ fontSize: 12, color: C.faint, marginTop: 2 }}>
               Started {fmtDate(openCycle.resetAt || openCycle.createdAt)} · Updated {fmtDate(openCycle.updatedAt)}
-            </div>
-          </div>
-
-          {/* Stats */}
-          <div style={{ ...card, marginBottom: 16, borderTop: `3px solid ${C.gold}` }}>
-            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
-              <div style={{ fontSize: 34, fontWeight: 700 }}>{st.pct}%</div>
-              <div style={{ fontSize: 13, color: C.faint }}>
-                {st.done.toLocaleString()} / {st.total.toLocaleString()} ayahs
-              </div>
-            </div>
-            <div style={{ margin: "10px 0 14px" }}>
-              <ProgressBar value={st.done} max={st.total} height={8} />
-            </div>
-            <div style={{ display: "flex", gap: 8, textAlign: "center", marginBottom: 8 }}>
-              {[
-                ["Completed", st.completed, C.done],
-                ["In progress", st.inProgress, C.gold],
-                ["Not started", st.notStarted, C.faint],
-              ].map(([label, val, color]) => (
-                <div key={label} style={{ flex: 1, background: C.paper, borderRadius: 10, padding: "8px 4px" }}>
-                  <div style={{ fontSize: 18, fontWeight: 700, color }}>{val}</div>
-                  <div style={{ fontSize: 11, color: C.faint }}>{label}</div>
-                </div>
-              ))}
-            </div>
-            {/* Daily pace */}
-            <div style={{ display: "flex", gap: 8, textAlign: "center" }}>
-              <div style={{ flex: 1, background: "#F1F6F2", borderRadius: 10, padding: "8px 4px" }}>
-                <div style={{ fontSize: 18, fontWeight: 700, color: C.inkSoft }}>
-                  {st.avgPerDay.toLocaleString()}
-                </div>
-                <div style={{ fontSize: 11, color: C.faint }}>avg ayahs / day</div>
-              </div>
-              <div style={{ flex: 1, background: "#F1F6F2", borderRadius: 10, padding: "8px 4px" }}>
-                <div style={{ fontSize: 18, fontWeight: 700, color: C.inkSoft }}>
-                  {st.today.toLocaleString()}
-                </div>
-                <div style={{ fontSize: 11, color: C.faint }}>ayahs today</div>
-              </div>
-              <div style={{ flex: 1, background: "#F1F6F2", borderRadius: 10, padding: "8px 4px" }}>
-                <div style={{ fontSize: 18, fontWeight: 700, color: C.inkSoft }}>
-                  {st.days}
-                </div>
-                <div style={{ fontSize: 11, color: C.faint }}>day{st.days === 1 ? "" : "s"} elapsed</div>
-              </div>
             </div>
           </div>
 
@@ -669,13 +1009,138 @@ export default function QuranRevisionTracker() {
               </div>
             )}
           </div>
+
+          {/* Stats — moved to the bottom of the page */}
+          <div style={{ ...card, marginTop: 16, borderTop: `3px solid ${C.gold}` }}>
+            <div style={{ display: "flex", alignItems: "baseline", justifyContent: "space-between" }}>
+              <div style={{ fontSize: 34, fontWeight: 700 }}>{st.pct}%</div>
+              <div style={{ fontSize: 13, color: C.faint }}>
+                {st.done.toLocaleString()} / {st.total.toLocaleString()} ayahs
+              </div>
+            </div>
+            <div style={{ margin: "10px 0 14px" }}>
+              <ProgressBar value={st.done} max={st.total} height={8} />
+            </div>
+            <div style={{ display: "flex", gap: 8, textAlign: "center", marginBottom: 8 }}>
+              {[
+                ["Completed", st.completed, C.done],
+                ["In progress", st.inProgress, C.gold],
+                ["Not started", st.notStarted, C.faint],
+              ].map(([label, val, color]) => (
+                <div key={label} style={{ flex: 1, background: C.paper, borderRadius: 10, padding: "8px 4px" }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, color }}>{val}</div>
+                  <div style={{ fontSize: 11, color: C.faint }}>{label}</div>
+                </div>
+              ))}
+            </div>
+            {/* Daily pace */}
+            <div style={{ display: "flex", gap: 8, textAlign: "center" }}>
+              <div style={{ flex: 1, background: "#F1F6F2", borderRadius: 10, padding: "8px 4px" }}>
+                <div style={{ fontSize: 18, fontWeight: 700, color: C.inkSoft }}>
+                  {st.avgPerDay.toLocaleString()}
+                </div>
+                <div style={{ fontSize: 11, color: C.faint }}>avg ayahs / day</div>
+              </div>
+              <div style={{ flex: 1, background: "#F1F6F2", borderRadius: 10, padding: "8px 4px" }}>
+                <div style={{ fontSize: 18, fontWeight: 700, color: C.inkSoft }}>
+                  {st.today.toLocaleString()}
+                </div>
+                <div style={{ fontSize: 11, color: C.faint }}>ayahs today</div>
+              </div>
+              <div style={{ flex: 1, background: "#F1F6F2", borderRadius: 10, padding: "8px 4px" }}>
+                <div style={{ fontSize: 18, fontWeight: 700, color: C.inkSoft }}>
+                  {st.days}
+                </div>
+                <div style={{ fontSize: 11, color: C.faint }}>day{st.days === 1 ? "" : "s"} elapsed</div>
+              </div>
+            </div>
+          </div>
         </div>
       </div>
     );
   }
 
   // =====================================================================
-  // HOME — CYCLES LIST
+  // FOLDER VIEW (cycles grouped inside a folder)
+  // =====================================================================
+  if (openFolder) {
+    const inFolder = folderCycles(openFolder.id);
+    return (
+      <div style={page}>
+        <div style={wrap}>
+          <button onClick={popNav} style={{ ...ghostBtn, marginBottom: 14 }}>
+            ← All cycles
+          </button>
+
+          <div style={{ marginBottom: 16, display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+            {renamingFolderId === openFolder.id ? (
+              <div style={{ flex: 1 }}>
+                <input
+                  autoFocus
+                  value={renameFolderText}
+                  onChange={(e) => setRenameFolderText(e.target.value)}
+                  onKeyDown={(e) => e.key === "Enter" && renameFolder(openFolder.id)}
+                  style={inputStyle}
+                />
+                <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
+                  <button onClick={() => renameFolder(openFolder.id)} style={btn()}>Save name</button>
+                  <button onClick={() => setRenamingFolderId(null)} style={ghostBtn}>Cancel</button>
+                </div>
+              </div>
+            ) : (
+              <>
+                <div style={{ fontSize: 22, fontWeight: 700 }}>📁 {openFolder.name}</div>
+                <div style={{ display: "flex", gap: 8 }}>
+                  <button onClick={() => { setRenamingFolderId(openFolder.id); setRenameFolderText(openFolder.name); }} style={ghostBtn}>
+                    Rename
+                  </button>
+                  <button onClick={() => setConfirmDeleteFolderId(openFolder.id)} style={{ ...ghostBtn, color: C.danger, borderColor: "#E8C7C2" }}>
+                    Delete
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
+
+          {confirmDeleteFolderId === openFolder.id && (
+            <div style={{ ...card, marginBottom: 16 }}>
+              <div style={{ fontSize: 14, marginBottom: 10 }}>
+                Delete folder <b>{openFolder.name}</b>? Its {inFolder.length} cycle{inFolder.length === 1 ? "" : "s"} won't be deleted — they'll move to "Ungrouped".
+              </div>
+              <div style={{ display: "flex", gap: 8 }}>
+                <button onClick={() => deleteFolder(openFolder.id)} style={btn(C.danger)}>Delete folder</button>
+                <button onClick={() => setConfirmDeleteFolderId(null)} style={ghostBtn}>Keep it</button>
+              </div>
+            </div>
+          )}
+
+          {creating ? (
+            renderCycleWizard()
+          ) : (
+            <button onClick={() => setCreating(true)} style={{ ...btn(), width: "100%", padding: "13px", marginBottom: 16 }}>
+              + New revision cycle in this folder
+            </button>
+          )}
+
+          {inFolder.length === 0 && !creating && (
+            <div style={{ textAlign: "center", color: C.faint, fontSize: 14, padding: "40px 16px" }}>
+              No cycles in this folder yet.
+            </div>
+          )}
+
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+            {inFolder.map((c) => renderCycleCard(c))}
+          </div>
+
+          {/* Stats — moved to the bottom of the page */}
+          {renderProgressOverview(inFolder, "Folder progress")}
+        </div>
+      </div>
+    );
+  }
+
+  // =====================================================================
+  // HOME — FOLDERS + UNGROUPED CYCLES
   // =====================================================================
   return (
     <div style={page}>
@@ -695,238 +1160,69 @@ export default function QuranRevisionTracker() {
           </div>
         )}
 
-        {/* Dashboard — cycle progress at a glance */}
-        {cycles.length > 0 && (
-          <div style={{ ...card, marginBottom: 16, borderTop: `3px solid ${C.gold}` }}>
-            <div style={{ fontSize: 13, fontWeight: 700, color: C.inkSoft, marginBottom: 12 }}>
-              Progress overview
-            </div>
-            <div
-              style={{
-                display: "grid",
-                gridTemplateColumns: "repeat(auto-fill, minmax(96px, 1fr))",
-                gap: 12,
-              }}
-            >
-              {cycles.map((c) => {
-                const st = cycleStats(c);
-                const size = 76, stroke = 9;
-                const r = (size - stroke) / 2;
-                const circ = 2 * Math.PI * r;
-                const frac = Math.min(st.pct, 100) / 100;
-                const ringColor = st.pct >= 100 ? C.done : C.gold;
-                return (
-                  <div
-                    key={c.id}
-                    onClick={() => setOpenCycleId(c.id)}
-                    style={{ textAlign: "center", cursor: "pointer" }}
-                  >
-                    <div style={{ position: "relative", width: size, height: size, margin: "0 auto" }}>
-                      <svg width={size} height={size} style={{ transform: "rotate(-90deg)" }}>
-                        <circle
-                          cx={size / 2} cy={size / 2} r={r}
-                          fill="none" stroke={C.line} strokeWidth={stroke}
-                        />
-                        <circle
-                          cx={size / 2} cy={size / 2} r={r}
-                          fill="none" stroke={ringColor} strokeWidth={stroke}
-                          strokeLinecap="round"
-                          strokeDasharray={circ}
-                          strokeDashoffset={circ * (1 - frac)}
-                          style={{ transition: "stroke-dashoffset .4s ease" }}
-                        />
-                      </svg>
-                      <div
-                        style={{
-                          position: "absolute", inset: 0,
-                          display: "flex", alignItems: "center", justifyContent: "center",
-                          fontSize: 14, fontWeight: 700,
-                          color: st.pct >= 100 ? C.done : C.ink,
-                        }}
-                      >
-                        {st.pct >= 100 ? "✓" : `${Math.round(st.pct)}%`}
-                      </div>
-                    </div>
-                    <div
-                      style={{
-                        fontSize: 11, fontWeight: 600, color: C.inkSoft, marginTop: 6,
-                        overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap",
-                      }}
-                    >
-                      {c.name}
-                    </div>
-                    <div style={{ fontSize: 10, color: C.faint, marginTop: 1 }}>
-                      ~{st.avgPerDay} ayahs/day
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          </div>
-        )}
-
-        {/* New cycle — step 1: name + scope */}
-        {creating ? (
+        {/* New folder inline form */}
+        {creatingFolder && (
           <div style={{ ...card, marginBottom: 16 }}>
             <input
               autoFocus
-              placeholder={`Cycle name (e.g. Cycle ${cycles.length + 1}, Ramadan revision)`}
-              value={newName}
-              onChange={(e) => setNewName(e.target.value)}
+              placeholder="Folder name (e.g. Ramadan, Memorization)"
+              value={newFolderName}
+              onChange={(e) => setNewFolderName(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && createFolder()}
               style={inputStyle}
             />
-
-            <div style={{ fontSize: 13, fontWeight: 600, margin: "14px 0 8px", color: C.inkSoft }}>
-              What does this cycle cover?
-            </div>
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              {[
-                ["full", "Full Quran", `All 114 surahs · ${TOTAL_AYAHS.toLocaleString()} ayahs`],
-                ["custom", "Pick surahs", "Choose specific surahs for this cycle"],
-              ].map(([val, title, sub]) => {
-                const sel = scope === val;
-                return (
-                  <div
-                    key={val}
-                    onClick={() => setScope(val)}
-                    style={{
-                      display: "flex", alignItems: "center", gap: 12,
-                      padding: "12px", borderRadius: 12, cursor: "pointer",
-                      border: `2px solid ${sel ? C.ink : C.line}`,
-                      background: sel ? "#F1F6F2" : "#fff",
-                    }}
-                  >
-                    <div
-                      style={{
-                        width: 18, height: 18, borderRadius: "50%", flexShrink: 0,
-                        border: `2px solid ${sel ? C.ink : C.line}`,
-                        display: "flex", alignItems: "center", justifyContent: "center",
-                      }}
-                    >
-                      {sel && <div style={{ width: 9, height: 9, borderRadius: "50%", background: C.ink }} />}
-                    </div>
-                    <div>
-                      <div style={{ fontSize: 14, fontWeight: 600 }}>{title}</div>
-                      <div style={{ fontSize: 12, color: C.faint }}>{sub}</div>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-
-            <div style={{ display: "flex", gap: 8, marginTop: 14 }}>
-              <button onClick={handleCreateContinue} style={{ ...btn(), flex: 1 }}>
-                {scope === "full" ? "Create cycle" : "Choose surahs →"}
-              </button>
-              <button onClick={resetWizard} style={ghostBtn}>Cancel</button>
+            <div style={{ display: "flex", gap: 8, marginTop: 10 }}>
+              <button onClick={createFolder} style={{ ...btn(), flex: 1 }}>Create folder</button>
+              <button onClick={() => { setCreatingFolder(false); setNewFolderName(""); }} style={ghostBtn}>Cancel</button>
             </div>
           </div>
-        ) : (
-          <button onClick={() => setCreating(true)} style={{ ...btn(), width: "100%", padding: "13px", marginBottom: 16 }}>
-            + New revision cycle
-          </button>
         )}
 
-        {/* Cycles */}
-        {cycles.length === 0 && !creating && (
+        {/* New cycle wizard — step 1: name + scope */}
+        {creating && renderCycleWizard()}
+
+        {!creating && !creatingFolder && (
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <button onClick={() => setCreating(true)} style={{ ...btn(), flex: 1, padding: "13px" }}>
+              + New revision cycle
+            </button>
+            <button onClick={() => setCreatingFolder(true)} style={{ ...ghostBtn, padding: "13px 16px" }}>
+              + Folder
+            </button>
+          </div>
+        )}
+
+        {/* Folders */}
+        {folders.length > 0 && (
+          <>
+            <div style={sectionTitle}>Folders</div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 12, marginBottom: 8 }}>
+              {folders.map((f) => renderFolderCard(f))}
+            </div>
+          </>
+        )}
+
+        {/* Ungrouped cycles */}
+        {folders.length > 0 && <div style={sectionTitle}>Cycles</div>}
+
+        {cycles.length === 0 && folders.length === 0 && !creating && !creatingFolder && (
           <div style={{ textAlign: "center", color: C.faint, fontSize: 14, padding: "40px 16px" }}>
             No cycles yet. Create your first revision cycle to begin tracking, in shaa Allah.
           </div>
         )}
 
+        {ungroupedCycles.length === 0 && cycles.length > 0 && folders.length > 0 && (
+          <div style={{ textAlign: "center", color: C.faint, fontSize: 13, padding: "16px 0 8px" }}>
+            All cycles are organized into folders above.
+          </div>
+        )}
+
         <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-          {cycles.map((c) => {
-            const st = cycleStats(c);
-            const isFull = st.surahCount === 114;
-            return (
-              <div key={c.id} style={{ ...card, borderRight: `3px solid ${C.gold}` }}>
-                {renamingId === c.id ? (
-                  <div>
-                    <input
-                      autoFocus
-                      value={renameText}
-                      onChange={(e) => setRenameText(e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && renameCycle(c.id)}
-                      style={inputStyle}
-                    />
-                    <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-                      <button onClick={() => renameCycle(c.id)} style={btn()}>Save name</button>
-                      <button onClick={() => setRenamingId(null)} style={ghostBtn}>Cancel</button>
-                    </div>
-                  </div>
-                ) : confirmResetId === c.id ? (
-                  <div>
-                    <div style={{ fontSize: 14, marginBottom: 10 }}>
-                      Reset all progress in <b>{c.name}</b> back to zero? The surah selection stays the same, and the daily pace counter restarts.
-                    </div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <button onClick={() => resetCycleProgress(c.id)} style={btn(C.gold)}>Reset progress</button>
-                      <button onClick={() => setConfirmResetId(null)} style={ghostBtn}>Keep it</button>
-                    </div>
-                  </div>
-                ) : confirmDeleteId === c.id ? (
-                  <div>
-                    <div style={{ fontSize: 14, marginBottom: 10 }}>
-                      Delete <b>{c.name}</b> and all its progress? This can't be undone.
-                    </div>
-                    <div style={{ display: "flex", gap: 8 }}>
-                      <button onClick={() => deleteCycle(c.id)} style={btn(C.danger)}>Delete</button>
-                      <button onClick={() => setConfirmDeleteId(null)} style={ghostBtn}>Keep it</button>
-                    </div>
-                  </div>
-                ) : (
-                  <>
-                    <div
-                      onClick={() => setOpenCycleId(c.id)}
-                      style={{ cursor: "pointer" }}
-                    >
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
-                          <div style={{ fontSize: 16, fontWeight: 700 }}>{c.name}</div>
-                          <span
-                            style={{
-                              fontSize: 10, fontWeight: 600, padding: "2px 7px", borderRadius: 99, whiteSpace: "nowrap",
-                              background: isFull ? "#EAF3ED" : C.goldSoft,
-                              color: isFull ? C.done : "#7A5A14",
-                            }}
-                          >
-                            {isFull ? "Full Quran" : `${st.surahCount} surahs`}
-                          </span>
-                        </div>
-                        <div style={{ fontSize: 15, fontWeight: 700, color: st.pct >= 100 ? C.done : C.gold }}>
-                          {st.pct}%
-                        </div>
-                      </div>
-                      <div style={{ margin: "8px 0" }}>
-                        <ProgressBar value={st.done} max={st.total} />
-                      </div>
-                      <div style={{ fontSize: 12, color: C.faint }}>
-                        {st.done.toLocaleString()} of {st.total.toLocaleString()} ayahs · {st.completed} of {st.surahCount} surahs · ~{st.avgPerDay} ayahs/day · updated {fmtDate(c.updatedAt)}
-                      </div>
-                    </div>
-                    <div style={{ display: "flex", gap: 8, marginTop: 12, flexWrap: "wrap" }}>
-                      <button onClick={() => setOpenCycleId(c.id)} style={{ ...btn(C.inkSoft), flex: 1, padding: "8px 12px", fontSize: 13, minWidth: 70 }}>
-                        Open
-                      </button>
-                      <button onClick={() => { setRenamingId(c.id); setRenameText(c.name); }} style={ghostBtn}>
-                        Rename
-                      </button>
-                      <button onClick={() => duplicateCycle(c.id)} style={ghostBtn}>
-                        Duplicate
-                      </button>
-                      <button onClick={() => setConfirmResetId(c.id)} style={{ ...ghostBtn, color: "#7A5A14", borderColor: C.goldSoft }}>
-                        Reset
-                      </button>
-                      <button onClick={() => setConfirmDeleteId(c.id)} style={{ ...ghostBtn, color: C.danger, borderColor: "#E8C7C2" }}>
-                        Delete
-                      </button>
-                    </div>
-                  </>
-                )}
-              </div>
-            );
-          })}
+          {ungroupedCycles.map((c) => renderCycleCard(c))}
         </div>
+
+        {/* Stats — moved to the bottom of the page */}
+        {renderProgressOverview(cycles, "Progress overview")}
       </div>
     </div>
   );
