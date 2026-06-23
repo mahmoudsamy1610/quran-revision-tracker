@@ -278,6 +278,28 @@ export default function QuranRevisionTracker() {
     setConfirmDeleteFolderId(null);
     if (navTop.screen === "folder" && navTop.folderId === id) popNav();
   };
+  // Duplicate a folder along with its cycles — copies keep the same surah
+  // selection but start with zero progress.
+  const duplicateFolder = (id) => {
+    const src = folders.find((f) => f.id === id);
+    if (!src) return;
+    const now = Date.now();
+    const newFolderId = now.toString(36);
+    const newFolder = { id: newFolderId, name: `${src.name} (copy)`, createdAt: now, updatedAt: now };
+    const copies = cycles
+      .filter((c) => c.folderId === id)
+      .map((c, i) => ({
+        id: (now + i + 1).toString(36),
+        name: c.name,
+        createdAt: now,
+        updatedAt: now,
+        progress: {}, // fresh start — zero progress
+        log: {},
+        surahs: c.surahs ? [...c.surahs] : null,
+        folderId: newFolderId,
+      }));
+    persist([...copies, ...cycles], [newFolder, ...folders]);
+  };
 
   // ---------- Cycle CRUD ----------
   const createCycle = (surahNums) => {
@@ -676,6 +698,9 @@ export default function QuranRevisionTracker() {
               </button>
               <button onClick={() => { setRenamingFolderId(f.id); setRenameFolderText(f.name); }} style={ghostBtn}>
                 Rename
+              </button>
+              <button onClick={() => duplicateFolder(f.id)} style={ghostBtn}>
+                Duplicate
               </button>
               <button onClick={() => setConfirmDeleteFolderId(f.id)} style={{ ...ghostBtn, color: C.danger, borderColor: "#E8C7C2" }}>
                 Delete
@@ -1090,9 +1115,12 @@ export default function QuranRevisionTracker() {
             ) : (
               <>
                 <div style={{ fontSize: 22, fontWeight: 700 }}>📁 {openFolder.name}</div>
-                <div style={{ display: "flex", gap: 8 }}>
+                <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
                   <button onClick={() => { setRenamingFolderId(openFolder.id); setRenameFolderText(openFolder.name); }} style={ghostBtn}>
                     Rename
+                  </button>
+                  <button onClick={() => duplicateFolder(openFolder.id)} style={ghostBtn}>
+                    Duplicate
                   </button>
                   <button onClick={() => setConfirmDeleteFolderId(openFolder.id)} style={{ ...ghostBtn, color: C.danger, borderColor: "#E8C7C2" }}>
                     Delete
