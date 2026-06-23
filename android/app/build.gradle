@@ -1,5 +1,17 @@
 apply plugin: 'com.android.application'
 
+// Version is overridable from the command line (CI passes the build number),
+// so every published APK gets a higher versionCode and a fresh versionName.
+//   ./gradlew assembleRelease -PversionCode=12 -PversionName=1.0.12
+def appVersionCode = project.hasProperty('versionCode') ? project.versionCode.toInteger() : 1
+def appVersionName = project.hasProperty('versionName') ? project.versionName.toString() : "1.0"
+
+// Release signing pulls from environment variables provided by CI (GitHub Secrets).
+// If they aren't set (e.g. a local build before secrets exist), we fall back to the
+// debug key so the build still succeeds.
+def ksStorePassword = System.getenv("ANDROID_KEYSTORE_PASSWORD")
+def hasReleaseKeystore = ksStorePassword != null && !ksStorePassword.isEmpty()
+
 android {
     namespace "com.mahmoudsamy.quranrevision"
     compileSdk rootProject.ext.compileSdkVersion
@@ -7,8 +19,8 @@ android {
         applicationId "com.mahmoudsamy.quranrevision"
         minSdkVersion rootProject.ext.minSdkVersion
         targetSdkVersion rootProject.ext.targetSdkVersion
-        versionCode 1
-        versionName "1.0"
+        versionCode appVersionCode
+        versionName appVersionName
         testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
         aaptOptions {
              // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
@@ -16,10 +28,21 @@ android {
             ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
         }
     }
+    signingConfigs {
+        release {
+            if (hasReleaseKeystore) {
+                storeFile file(System.getenv("ANDROID_KEYSTORE_FILE") ?: "release.keystore")
+                storePassword ksStorePassword
+                keyAlias System.getenv("ANDROID_KEY_ALIAS")
+                keyPassword System.getenv("ANDROID_KEY_PASSWORD")
+            }
+        }
+    }
     buildTypes {
         release {
             minifyEnabled false
             proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            signingConfig hasReleaseKeystore ? signingConfigs.release : signingConfigs.debug
         }
     }
 }

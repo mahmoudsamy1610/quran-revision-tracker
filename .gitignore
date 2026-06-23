@@ -20,6 +20,11 @@ android/captures/
 android/local.properties
 *.apk
 
+# Signing keys — NEVER commit these (kept in GitHub Secrets instead)
+*.keystore
+*.jks
+keystore.properties
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json
