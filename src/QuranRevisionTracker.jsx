@@ -159,6 +159,17 @@ export default function QuranRevisionTracker() {
   const [picked, setPicked] = useState(new Set());
   const [pickSearch, setPickSearch] = useState("");
 
+  // ---- Side menu ----
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [appVersion, setAppVersion] = useState(null);
+
+  // Native app version (only resolves on a real Android build; stays null in web preview)
+  useEffect(() => {
+    CapApp.getInfo()
+      .then((info) => setAppVersion(info.version))
+      .catch(() => {});
+  }, []);
+
   // Amiri font for Arabic
   useEffect(() => {
     const link = document.createElement("link");
@@ -215,14 +226,17 @@ export default function QuranRevisionTracker() {
   const navTop = nav[nav.length - 1];
   const pushCycle = (id) => setNav((n) => [...n, { screen: "cycle", cycleId: id }]);
   const pushFolder = (id) => setNav((n) => [...n, { screen: "folder", folderId: id }]);
+  const pushAbout = () => setNav((n) => [...n, { screen: "about" }]);
   const popNav = () => setNav((n) => (n.length > 1 ? n.slice(0, -1) : n));
 
   const openCycle = navTop.screen === "cycle" ? cycles.find((c) => c.id === navTop.cycleId) : null;
   const openFolder = navTop.screen === "folder" ? folders.find((f) => f.id === navTop.folderId) : null;
+  const openAbout = navTop.screen === "about";
   const activeFolderId = navTop.screen === "folder" ? navTop.folderId : null;
 
   // Close whatever overlay/panel is open; return true if something was closed.
   const closeTopOverlay = () => {
+    if (menuOpen) { setMenuOpen(false); return true; }
     if (picking) { setPicking(false); return true; }
     if (creating) { resetWizard(); return true; }
     if (creatingFolder) { setCreatingFolder(false); setNewFolderName(""); return true; }
@@ -482,6 +496,57 @@ export default function QuranRevisionTracker() {
     outline: "none",
   };
   const sectionTitle = { fontSize: 13, fontWeight: 700, color: C.inkSoft, margin: "18px 0 8px" };
+
+  // Reusable: hamburger trigger (top-left, every screen) + the slide-in drawer
+  const renderMenuLayer = () => (
+    <>
+      <button
+        onClick={() => setMenuOpen(true)}
+        aria-label="Open menu"
+        style={{
+          position: "fixed", top: 14, left: 14, zIndex: 40,
+          width: 38, height: 38, borderRadius: 10,
+          background: C.card, border: `1px solid ${C.line}`,
+          display: "flex", alignItems: "center", justifyContent: "center",
+          fontSize: 17, cursor: "pointer", color: C.ink,
+          boxShadow: "0 1px 5px rgba(0,0,0,0.10)",
+        }}
+      >
+        ☰
+      </button>
+      {menuOpen && (
+        <>
+          <div
+            onClick={() => setMenuOpen(false)}
+            style={{ position: "fixed", inset: 0, background: "rgba(23,59,44,0.35)", zIndex: 45 }}
+          />
+          <div
+            style={{
+              position: "fixed", top: 0, left: 0, bottom: 0, width: 260,
+              background: C.card, zIndex: 46, boxShadow: "2px 0 18px rgba(0,0,0,0.14)",
+              padding: "20px 14px", boxSizing: "border-box",
+              display: "flex", flexDirection: "column", gap: 4,
+            }}
+          >
+            <div style={{ fontSize: 13, fontWeight: 700, color: C.inkSoft, margin: "4px 8px 14px" }}>
+              Menu
+            </div>
+            <button
+              onClick={() => { setMenuOpen(false); pushAbout(); }}
+              style={{
+                display: "flex", alignItems: "center", gap: 10,
+                background: "transparent", border: "none", textAlign: "left",
+                padding: "10px 8px", borderRadius: 10, cursor: "pointer",
+                fontSize: 14, fontWeight: 600, color: C.ink,
+              }}
+            >
+              <span>ℹ️</span> About The App
+            </button>
+          </div>
+        </>
+      )}
+    </>
+  );
 
   // Reusable: dashboard of donut-chart progress rings for a list of cycles
   const renderProgressOverview = (list, title = "Progress overview") => {
@@ -783,6 +848,7 @@ export default function QuranRevisionTracker() {
   // =====================================================================
   if (picking) {
     return (
+      <>
       <div style={page}>
         <div style={{ ...wrap, paddingBottom: 110 }}>
           <button onClick={() => setPicking(false)} style={{ ...ghostBtn, marginBottom: 14 }}>
@@ -889,6 +955,8 @@ export default function QuranRevisionTracker() {
           </div>
         </div>
       </div>
+      {renderMenuLayer()}
+      </>
     );
   }
 
@@ -899,6 +967,7 @@ export default function QuranRevisionTracker() {
     const st = cycleStats(openCycle);
     const isFull = st.surahCount === 114;
     return (
+      <>
       <div style={page}>
         <div style={wrap}>
           <button
@@ -1082,6 +1151,8 @@ export default function QuranRevisionTracker() {
           </div>
         </div>
       </div>
+      {renderMenuLayer()}
+      </>
     );
   }
 
@@ -1091,6 +1162,7 @@ export default function QuranRevisionTracker() {
   if (openFolder) {
     const inFolder = folderCycles(openFolder.id);
     return (
+      <>
       <div style={page}>
         <div style={wrap}>
           <button onClick={popNav} style={{ ...ghostBtn, marginBottom: 14 }}>
@@ -1164,6 +1236,51 @@ export default function QuranRevisionTracker() {
           {renderProgressOverview(inFolder, "Folder progress")}
         </div>
       </div>
+      {renderMenuLayer()}
+      </>
+    );
+  }
+
+  // =====================================================================
+  // ABOUT THE APP
+  // =====================================================================
+  if (openAbout) {
+    return (
+      <>
+      <div style={page}>
+        <div style={wrap}>
+          <button onClick={popNav} style={{ ...ghostBtn, marginBottom: 14 }}>
+            ← Back
+          </button>
+
+          <div style={{ textAlign: "center", marginBottom: 22 }}>
+            <div style={{ ...arabic, fontSize: 26, color: C.ink }}>متابعة المراجعة</div>
+            <div style={{ fontSize: 20, fontWeight: 700, marginTop: 6 }}>About The App</div>
+            <div style={{ width: 56, height: 3, background: C.gold, borderRadius: 2, margin: "12px auto 0" }} />
+          </div>
+
+          <div style={card}>
+            <div style={{ fontSize: 14, lineHeight: 1.6, color: C.ink }}>
+              Quran Revision Tracker helps you plan and stay on top of your Quran
+              muraja'ah. Create revision cycles for the full Quran or a custom
+              selection of surahs, log the ayah you've reached in each one, and
+              watch your daily pace. Group cycles into folders, duplicate cycles
+              or whole folders to start a fresh round, and review your progress
+              with per-cycle stats and donut-chart overviews — all stored locally
+              on your device.
+            </div>
+          </div>
+
+          <div style={{ ...card, marginTop: 12, textAlign: "center" }}>
+            <div style={{ fontSize: 12, color: C.faint }}>Version</div>
+            <div style={{ fontSize: 16, fontWeight: 700, marginTop: 2 }}>
+              {appVersion || "Web preview"}
+            </div>
+          </div>
+        </div>
+      </div>
+      {renderMenuLayer()}
+      </>
     );
   }
 
@@ -1171,6 +1288,7 @@ export default function QuranRevisionTracker() {
   // HOME — FOLDERS + UNGROUPED CYCLES
   // =====================================================================
   return (
+    <>
     <div style={page}>
       <div style={wrap}>
         {/* Header */}
@@ -1253,5 +1371,7 @@ export default function QuranRevisionTracker() {
         {renderProgressOverview(cycles, "Progress overview")}
       </div>
     </div>
+    {renderMenuLayer()}
+    </>
   );
 }
