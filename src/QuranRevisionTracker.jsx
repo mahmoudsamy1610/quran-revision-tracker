@@ -458,7 +458,7 @@ export default function QuranRevisionTracker() {
     fontFamily: "'Segoe UI', system-ui, -apple-system, sans-serif",
     paddingTop: "env(safe-area-inset-top, 0px)",
   };
-  const wrap = { maxWidth: 560, margin: "0 auto", padding: "20px 16px 48px" };
+  const wrap = { maxWidth: 560, margin: "0 auto", padding: "52px 16px 48px" };
   const arabic = { fontFamily: "'Amiri', 'Traditional Arabic', serif" };
   const card = {
     background: C.card,
@@ -505,7 +505,7 @@ export default function QuranRevisionTracker() {
         onClick={() => setMenuOpen(true)}
         aria-label="Open menu"
         style={{
-          position: "fixed", top: "calc(14px + env(safe-area-inset-top, 0px))", left: 14, zIndex: 40,
+          position: "fixed", top: "calc(8px + env(safe-area-inset-top, 0px))", left: 14, zIndex: 40,
           width: 38, height: 38, borderRadius: 10,
           background: C.card, border: `1px solid ${C.line}`,
           display: "flex", alignItems: "center", justifyContent: "center",
